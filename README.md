@@ -43,4 +43,4 @@ The script ensures all required dependencies are present, handles OS-specific in
 Open an **elevated PowerShell window** (Run as Administrator) and run:
 
 ```powershell
-irm "https://scripts.kalixhosting.com/winget22/" | iex
+irm "https://scripts.noxhosting.io/winget22/" | iex
