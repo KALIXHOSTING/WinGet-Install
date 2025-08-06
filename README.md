@@ -13,6 +13,7 @@ The script ensures all required dependencies are present, handles OS-specific in
 
 - **Automatic Download of Dependencies:**  
   Downloads the latest official winget installer, license, and dependency files directly from the [Microsoft winget-cli GitHub releases](https://github.com/microsoft/winget-cli/releases).
+  With Latest Version Provided from Winget-Cli Releases 
 
 - **Dependency Extraction:**  
   Extracts the required `.appx` files from the dependencies ZIP and prepares them for installation.
