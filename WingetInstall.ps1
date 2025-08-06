@@ -1,310 +1,128 @@
-<#
-.SYNOPSIS
-    Automated installation script for Windows Terminal dependencies, Winget, and Chocolatey
-.DESCRIPTION
-    This script downloads and installs Windows Terminal dependencies, Winget, and Chocolatey
-    with proper verification at each step.
-.NOTES
-    File Name      : Install-WingetDependencies.ps1
-    Prerequisite   : PowerShell 5.1 or later (run as Administrator)
-#>
-
 #Requires -RunAsAdministrator
 
-Clear-Host
-Set-ExecutionPolicy Bypass -Scope Process -Force -ErrorAction SilentlyContinue
+# --- Display Banner ---
+Write-Host @"
+__        ___                  _     ___           _        _ _           
+\ \      / (_)_ __   __ _  ___| |_  |_ _|_ __  ___| |_ __ _| | | ___ _ __ 
+ \ \ /\ / /| | '_ \ / _` |/ _ \ __|  | || '_ \/ __| __/ _` | | |/ _ \ '__|
+  \ V  V / | | | | | (_| |  __/ |_   | || | | \__ \ || (_| | | |  __/ |   
+   \_/\_/  |_|_| |_|\__, |\___|\__| |___|_| |_|___/\__\__,_|_|_|\___|_|   
+                    |___/           
+					
+ --- Made by NOXHosting ---
+"@ -ForegroundColor Cyan
+Write-Host "" # Add a blank line for spacing
 
-# Create Windows Terminal directory if it doesn't exist
-$terminalPath = "C:\Windows\Windows Terminal"
-if (-not (Test-Path -Path $terminalPath)) {
-    try {
-        New-Item -Path $terminalPath -ItemType Directory -Force | Out-Null
-        Write-Host "Created directory: $terminalPath" -ForegroundColor Green
+
+# --- Configuration ---
+# Stop script on any error within the try block for the primary method.
+$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+
+
+# --- Primary Method: Install Latest Version from GitHub ---
+try {
+    Write-Host "--- Attempting to install/update WinGet from GitHub (Primary Method) ---" -ForegroundColor Green
+
+    $githubRepo = "microsoft/winget-cli"
+    $tempDir = Join-Path -Path $env:TEMP -ChildPath "winget-install-latest"
+
+    # 1. Fetch the latest STABLE release from GitHub (ignores previews)
+    Write-Host "Fetching the latest stable release information..."
+    $releasesUrl = "https://api.github.com/repos/$githubRepo/releases"
+    $releases = Invoke-RestMethod -Uri $releasesUrl
+    $latestStableRelease = $releases | Where-Object { -not $_.prerelease } | Sort-Object -Property created_at -Descending | Select-Object -First 1
+
+    if (-not $latestStableRelease) {
+        throw "No stable releases were found for the '$githubRepo' repository."
     }
-    catch {
-        Write-Host "Failed to create directory: $terminalPath" -ForegroundColor Red
-        Pause
+    $latestVersion = $latestStableRelease.tag_name
+    Write-Host "Found latest stable version: $latestVersion"
+
+    # 2. Prepare for Download
+    if (Test-Path -Path $tempDir) {
+        Remove-Item -Path $tempDir -Recurse -Force
     }
+    New-Item -Path $tempDir -ItemType Directory | Out-Null
+
+    $msixBundleAsset = $latestStableRelease.assets | Where-Object { $_.name -like "*.msixbundle" }
+    $licenseAsset = $latestStableRelease.assets | Where-Object { $_.name -like "*License1.xml" }
+    $dependenciesAsset = $latestStableRelease.assets | Where-Object { $_.name -like "*Dependencies.zip" }
+
+    if (-not ($msixBundleAsset -and $licenseAsset -and $dependenciesAsset)) {
+        throw "Could not find all required installation assets in the release '$latestVersion'."
+    }
+
+    # 3. Download All Required Files
+    Write-Host "Downloading required files..."
+    $msixBundlePath = Join-Path -Path $tempDir -ChildPath $msixBundleAsset.name
+    $licensePath = Join-Path -Path $tempDir -ChildPath $licenseAsset.name
+    $dependenciesPath = Join-Path -Path $tempDir -ChildPath $dependenciesAsset.name
+
+    Invoke-WebRequest -Uri $msixBundleAsset.browser_download_url -OutFile $msixBundlePath
+    Invoke-WebRequest -Uri $licenseAsset.browser_download_url -OutFile $licensePath
+    Invoke-WebRequest -Uri $dependenciesAsset.browser_download_url -OutFile $dependenciesPath
+
+    # 4. Install Dependencies
+    Write-Host "Installing App Installer dependencies..."
+    Expand-Archive -Path $dependenciesPath -DestinationPath $tempDir -Force
+    Get-ChildItem -Path $tempDir -Filter "*.appx" | ForEach-Object {
+        Add-AppxPackage -Path $_.FullName
+    }
+
+    # 5. Install the WinGet CLI for all users
+    Write-Host "Installing WinGet CLI..."
+    Add-AppxProvisionedPackage -Online -PackagePath $msixBundlePath -LicensePath $licensePath
+
+    Write-Host "--- WinGet CLI ($latestVersion) installed successfully from GitHub. ---" -ForegroundColor Green
+
+    # 6. Cleanup
+    Write-Host "Cleaning up temporary installation files..."
+    Remove-Item -Path $tempDir -Recurse -Force
 }
+catch {
+    # --- Fallback Method: Install from Chocolatey ---
+    Write-Warning "Primary (GitHub) installation failed. Error: $($_.Exception.Message)"
+    Write-Host "--- Attempting to install prerequisites and WinGet from Chocolatey (Fallback Method) ---" -ForegroundColor Yellow
 
-# --- Download and install Visual C++ Redistributables ---
+    $ErrorActionPreference = "Continue" # Relax error handling for the fallback
 
-$vcRedists = @(
-    @{
-        Url = "https://aka.ms/vs/17/release/vc_redist.x86.exe"
-        FileName = "vc_redist.x86.exe"
-    },
-    @{
-        Url = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
-        FileName = "vc_redist.x64.exe"
-    }
-)
-
-foreach ($vc in $vcRedists) {
-    $vcPath = Join-Path -Path $terminalPath -ChildPath $vc.FileName
-    if (-not (Test-Path -Path $vcPath)) {
+    # 1. Check/Install Chocolatey
+    if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
+        Write-Host "Chocolatey not found. Installing Chocolatey..."
         try {
-            Write-Host "Downloading $($vc.FileName)..." -ForegroundColor Cyan
-            Invoke-WebRequest -Uri $vc.Url -OutFile $vcPath -UseBasicParsing
-            Write-Host "Download completed: $($vc.FileName)" -ForegroundColor Green
+            Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+            if (-not (Get-Command choco -ErrorAction SilentlyContinue)) { throw "Chocolatey installation failed." }
+            Write-Host "Chocolatey installed successfully." -ForegroundColor Green
         }
         catch {
-            Write-Host "Failed to download $($vc.FileName)" -ForegroundColor Red
-            Write-Host "Error: $_" -ForegroundColor Red
-            Pause
+            Write-Error "Failed to install Chocolatey. Cannot proceed. Error: $($_.Exception.Message)"
+            exit 1
         }
     } else {
-        Write-Host "File already exists: $($vc.FileName)" -ForegroundColor Yellow
+        Write-Host "Chocolatey is already installed."
     }
 
-    # Install the redistributable silently
-    try {
-        Write-Host "Installing $($vc.FileName)..." -ForegroundColor Cyan
-        $process = Start-Process -FilePath $vcPath -ArgumentList "/install", "/quiet", "/norestart" -Wait -PassThru
-        if ($process.ExitCode -ne 0) {
-            Write-Host "Installation failed for $($vc.FileName) with exit code $($process.ExitCode)" -ForegroundColor Red
-            Pause
-        } else {
-            Write-Host "$($vc.FileName) installed successfully" -ForegroundColor Green
-        }
-    }
-    catch {
-        Write-Host "Failed to install $($vc.FileName)" -ForegroundColor Red
-        Write-Host "Error: $_" -ForegroundColor Red
-        Pause
-    }
-}
-
-# --- Download Winget and dependencies from GitHub ---
-
-$wingetVersion = "v1.10.390"
-$githubBase = "https://github.com/microsoft/winget-cli/releases/download/$wingetVersion"
-
-$filesToDownload = @(
-    @{
-        Url = "$githubBase/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
-        FileName = "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
-    },
-    @{
-        Url = "$githubBase/e53e159d00e04f729cc2180cffd1c02e_License1.xml"
-        FileName = "e53e159d00e04f729cc2180cffd1c02e_License1.xml"
-    },
-    @{
-        Url = "$githubBase/DesktopAppInstaller_Dependencies.zip"
-        FileName = "DesktopAppInstaller_Dependencies.zip"
-    }
-)
-
-foreach ($file in $filesToDownload) {
-    $outputPath = Join-Path -Path $terminalPath -ChildPath $file.FileName
-    if (Test-Path -Path $outputPath) {
-        Write-Host "File already exists: $($file.FileName)" -ForegroundColor Yellow
-        continue
-    }
-    try {
-        Write-Host "Downloading $($file.FileName)..." -ForegroundColor Cyan
-        Invoke-WebRequest -Uri $file.Url -OutFile $outputPath -UseBasicParsing
-        Write-Host "Download completed: $($file.FileName)" -ForegroundColor Green
-    }
-    catch {
-        Write-Host "Failed to download $($file.FileName)" -ForegroundColor Red
-        Write-Host "Error: $_" -ForegroundColor Red
-        Pause
-    }
-}
-
-# --- Extract dependencies ZIP and copy required files ---
-
-$zipPath = Join-Path -Path $terminalPath -ChildPath "DesktopAppInstaller_Dependencies.zip"
-$extractPath = Join-Path -Path $terminalPath -ChildPath "Dependencies"
-if (-not (Test-Path -Path $extractPath)) {
-    try {
-        Write-Host "Extracting dependencies ZIP..." -ForegroundColor Cyan
-        Add-Type -AssemblyName System.IO.Compression.FileSystem
-        [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $extractPath)
-        Write-Host "Extraction completed." -ForegroundColor Green
-    }
-    catch {
-        Write-Host "Failed to extract dependencies ZIP." -ForegroundColor Red
-        Write-Host "Error: $_" -ForegroundColor Red
-        Pause
-    }
-} else {
-    Write-Host "Dependencies already extracted." -ForegroundColor Yellow
-}
-
-# Copy required .appx files from x64 subfolder
-$depX64Path = Join-Path -Path $extractPath -ChildPath "x64"
-$appxFiles = @(
-    "Microsoft.UI.Xaml.2.8_8.2501.31001.0_x64.appx",
-    "Microsoft.VCLibs.140.00.UWPDesktop_14.0.33728.0_x64.appx"
-)
-foreach ($appx in $appxFiles) {
-    $src = Join-Path -Path $depX64Path -ChildPath $appx
-    $dst = Join-Path -Path $terminalPath -ChildPath $appx
-    if (-not (Test-Path -Path $dst)) {
-        try {
-            Copy-Item -Path $src -Destination $dst -Force
-            Write-Host "Copied $appx to $terminalPath" -ForegroundColor Green
-        }
-        catch {
-            Write-Host "Failed to copy $appx" -ForegroundColor Red
-            Write-Host "Error: $_" -ForegroundColor Red
-            Pause
-        }
+    # 2. Install VC++ Redistributables via Chocolatey
+    Write-Host "Installing Visual C++ Redistributables..."
+    choco install vcredist14 -y --force
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "Visual C++ Redistributables installed successfully." -ForegroundColor Green
     } else {
-        Write-Host "$appx already exists in $terminalPath" -ForegroundColor Yellow
+        Write-Warning "Could not install Visual C++ Redistributables."
     }
-}
 
-# --- Verify all files are present ---
+    # 3. Install WinGet via Chocolatey
+    Write-Host "Installing WinGet using Chocolatey..."
+    choco install winget -y --force
 
-$allNeededFiles = @(
-    "Microsoft.UI.Xaml.2.8_8.2501.31001.0_x64.appx",
-    "Microsoft.VCLibs.140.00.UWPDesktop_14.0.33728.0_x64.appx",
-    "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle",
-    "e53e159d00e04f729cc2180cffd1c02e_License1.xml"
-)
-$missingFiles = @()
-foreach ($file in $allNeededFiles) {
-    $filePath = Join-Path -Path $terminalPath -ChildPath $file
-    if (-not (Test-Path -Path $filePath)) {
-        $missingFiles += $file
-    }
-}
-if ($missingFiles.Count -gt 0) {
-    Write-Host "Missing files:" -ForegroundColor Red
-    $missingFiles | ForEach-Object { Write-Host "- $_" -ForegroundColor Red }
-    Pause
-}
-
-# --- Install dependencies and Winget ---
-
-$appx1Path = Join-Path -Path $terminalPath -ChildPath "Microsoft.UI.Xaml.2.8_8.2501.31001.0_x64.appx"
-$appx2Path = Join-Path -Path $terminalPath -ChildPath "Microsoft.VCLibs.140.00.UWPDesktop_14.0.33728.0_x64.appx"
-$msixwingetPath = Join-Path -Path $terminalPath -ChildPath "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
-$wingetLicPath = Join-Path -Path $terminalPath -ChildPath "e53e159d00e04f729cc2180cffd1c02e_License1.xml"
-
-try {
-    Write-Host "Installing Microsoft.UI.Xaml package..." -ForegroundColor Cyan
-    Add-AppxPackage -Path $appx1Path -ErrorAction Stop
-    Write-Host "Microsoft.UI.Xaml package installed successfully" -ForegroundColor Green
-}
-catch {
-    Write-Host "Failed to install Microsoft.UI.Xaml package" -ForegroundColor Red
-    Write-Host "Error: $_" -ForegroundColor Red
-    Pause
-}
-
-try {
-    Write-Host "Installing Microsoft.VCLibs package..." -ForegroundColor Cyan
-    Add-AppxPackage -Path $appx2Path -ErrorAction Stop
-    Write-Host "Microsoft.VCLibs package installed successfully" -ForegroundColor Green
-}
-catch {
-    Write-Host "Failed to install Microsoft.VCLibs package" -ForegroundColor Red
-    Write-Host "Error: $_" -ForegroundColor Red
-    Pause
-}
-
-# --- OS detection and Winget install logic ---
-$osVersion = (Get-CimInstance Win32_OperatingSystem).Version
-$isWin10 = $false
-if ($osVersion.StartsWith("10.0")) {
-    $osCaption = (Get-CimInstance Win32_OperatingSystem).Caption
-    if ($osCaption -like "*Windows 10*") {
-        $isWin10 = $true
-    }
-}
-
-# Check Windows 10 build number for minimum compatibility (1809/17763 or later)
-$buildNumber = [int](Get-CimInstance Win32_OperatingSystem).BuildNumber
-if ($isWin10 -and $buildNumber -lt 17763) {
-    Write-Host "Your Windows 10 build ($buildNumber) is too old for Winget. Please update to at least 1809 (build 17763) or later." -ForegroundColor Red
-    Pause
-}
-
-if ($isWin10) {
-    # Windows 10: Use Add-AppxPackage for current user
-    try {
-        Write-Host "Detected Windows 10. Installing Winget package for current user..." -ForegroundColor Cyan
-        Add-AppxPackage -Path $msixwingetPath -ErrorAction Stop
-        Write-Host "Winget installed successfully (per-user)" -ForegroundColor Green
-    }
-    catch {
-        Write-Host "Failed to install Winget package on Windows 10" -ForegroundColor Red
-        Write-Host "Error: $_" -ForegroundColor Red
-        Write-Host "Try manually installing the msixbundle or updating Windows 10." -ForegroundColor Yellow
-        Pause
-    }
-} else {
-    # Windows 11/Server: Use Add-AppxProvisionedPackage for all users
-    try {
-        Write-Host "Provisioning Winget package for all users..." -ForegroundColor Cyan
-        Add-AppxProvisionedPackage -Online -PackagePath $msixwingetPath -LicensePath $wingetLicPath -ErrorAction Stop
-        Write-Host "Winget provisioned successfully" -ForegroundColor Green
-    }
-    catch {
-        Write-Host "Failed to provision Winget package" -ForegroundColor Red
-        Write-Host "Error: $_" -ForegroundColor Red
-        Pause
-    }
-}
-
-# Install Chocolatey
-try {
-    if (-not (Test-Path "$env:ProgramData\chocolatey\choco.exe")) {
-        Write-Host "Installing Chocolatey package manager..." -ForegroundColor Cyan
-        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-        Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))
-        Write-Host "Chocolatey installed successfully" -ForegroundColor Green
+    # 4. Verify Final Installation
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        Write-Host "--- WinGet installed successfully using Chocolatey. ---" -ForegroundColor Green
     } else {
-        Write-Host "Chocolatey is already installed" -ForegroundColor Yellow
-    }
-}
-catch {
-    Write-Host "Failed to install Chocolatey" -ForegroundColor Red
-    Write-Host "Error: $_" -ForegroundColor Red
-    Pause
-}
-
-# Verify Winget installation and fall back to Chocolatey if needed
-$wingetInstalled = $false
-try {
-    Write-Host "Verifying Winget installation..." -ForegroundColor Cyan
-    $wingetCheck = Get-Command winget -ErrorAction Stop
-    Write-Host "Winget is installed successfully!" -ForegroundColor Green
-    $wingetInstalled = $true
-
-    # Run winget upgrade if Winget is available
-    try {
-        Write-Host "Running winget upgrade --all..." -ForegroundColor Cyan
-        winget upgrade --all
-        Write-Host "Winget upgrade completed successfully" -ForegroundColor Green
-    }
-    catch {
-        Write-Host "Winget upgrade failed" -ForegroundColor Yellow
-        Write-Host "Error: $_" -ForegroundColor Yellow
-        Pause
-    }
-}
-catch {
-    Write-Host "Winget is not installed correctly" -ForegroundColor Red
-    Write-Host "Error: $_" -ForegroundColor Red
-    Write-Host "Attempting to install Winget via Chocolatey..." -ForegroundColor Yellow
-    try {
-        choco install winget -y
-        # Try again to verify
-        $wingetCheck = Get-Command winget -ErrorAction Stop
-        Write-Host "Winget installed successfully via Chocolatey!" -ForegroundColor Green
-        $wingetInstalled = $true
-    }
-    catch {
-        Write-Host "Failed to install Winget via Chocolatey." -ForegroundColor Red
-        Write-Host "Error: $_" -ForegroundColor Red
-        Pause
+        Write-Error "Failed to install WinGet using Chocolatey. Both methods have failed."
+        exit 1
     }
 }
 
-Write-Host "All installations completed (with or without errors). Please review any messages above." -ForegroundColor Green
-Pause
+Write-Host "Script finished."
