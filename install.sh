@@ -250,11 +250,9 @@ perform_installation() {
     # Generate random computer name
     RANDOM_SUFFIX=$(head /dev/urandom | tr -dc 'A-Z0-9' | head -c 4)
     COMPUTER_NAME="WIN-${RANDOM_SUFFIX}"
-
-    # Configuration display will be shown later after boot mode detection
-
+    
+    print_step "Checking System Requirements & Boot Mode"
     # find qemu
-    print_step "Checking System Requirements"
     QEMU_BIN=""
     for q in qemu-system-x86_64 kvm qemu-kvm; do
         if command -v $q >/dev/null 2>&1; then
@@ -275,11 +273,50 @@ perform_installation() {
     fi
 
     # Install other deps if needed (including OVMF for UEFI support)
-    for pkg in genisoimage bc dosfstools lsof ntfs-3g ovmf; do
+    for pkg in genisoimage bc dosfstools lsof ntfs-3g ovmf parted; do
         if ! command -v $pkg >/dev/null 2>&1 && ! dpkg -l | grep -q "^ii.*$pkg "; then
             apt-get install -y $pkg >/dev/null 2>&1 || true
         fi
     done
+
+    # Check CPU virtualization support first
+    CPU_SUPPORTS_VT=""
+    if grep -q "vmx\|svm" /proc/cpuinfo; then
+        if [ -r /dev/kvm ]; then
+            CPU_SUPPORTS_VT="yes"
+            print_success "CPU virtualization support detected"
+        else
+            print_warning "CPU supports virtualization but KVM module not loaded"
+            CPU_SUPPORTS_VT="limited"
+        fi
+    else
+        print_warning "CPU does not support hardware virtualization (VT-x/AMD-V)"
+        CPU_SUPPORTS_VT="no"
+    fi
+
+    # FIX: Moved this entire block before the autounattend.xml creation.
+    # This determines the boot mode for the VM, which is needed to create the correct partition scheme.
+    UEFI_BIOS=""
+    USE_UEFI="no"
+    
+    if [ "${FORCE_LEGACY_BIOS:-}" = "1" ] || [ "${DISABLE_UEFI:-}" = "1" ]; then
+        print_warning "UEFI disabled by user - forcing legacy BIOS mode"
+        USE_UEFI="no"
+    elif [ "$CPU_SUPPORTS_VT" = "yes" ]; then
+        for bios_path in /usr/share/ovmf/OVMF.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2-ovmf/x64/OVMF.fd; do
+            if [ -f "$bios_path" ]; then
+                # A simple file check is sufficient for now. The old compatibility test was slow and could fail.
+                UEFI_BIOS="$bios_path"
+                USE_UEFI="yes"
+                print_success "OVMF file found, will attempt UEFI install"
+                break
+            fi
+        done
+        
+        if [ "$USE_UEFI" = "no" ]; then
+            print_warning "OVMF not found - falling back to legacy BIOS"
+        fi
+    fi
 
     # Prep work disk
     if [ -n "${WORK_DISK:-}" ]; then
@@ -292,6 +329,10 @@ perform_installation() {
         parted -s "$WORK_DISK" mklabel gpt >/dev/null 2>&1
         parted -s "$WORK_DISK" mkpart primary ext4 1MiB 100% >/dev/null 2>&1
         parted -s "$WORK_DISK" set 1 legacy_boot on >/dev/null 2>&1
+        
+        # FIX: Add partprobe to force kernel to re-read partition table.
+        # This prevents the hang by ensuring the new partition is visible.
+        partprobe "$WORK_DISK" || true
         sleep 2
 
         # Find partition
@@ -300,7 +341,7 @@ perform_installation() {
         elif [ -e "${WORK_DISK}p1" ]; then
             WORK_PART="${WORK_DISK}p1"
         else
-            print_error "Work partition not found"
+            print_error "Work partition not found after running parted"
             exit 1
         fi
 
@@ -347,7 +388,7 @@ perform_installation() {
     # Create autounattend
     print_step "Creating Automated Installation Configuration"
     
-    # Generate partition configuration based on VM boot mode (not host boot mode)
+    # FIX: This logic now correctly uses the USE_UEFI variable which was determined earlier.
     if [ "$USE_UEFI" = "yes" ]; then
         PARTITION_CONFIG='                <Disk wcm:action="add">
                     <CreatePartitions>
@@ -599,67 +640,15 @@ EOF
     # Start VM
     print_step "Launching Windows Installation"
 
-    # Check CPU virtualization support first
-    CPU_SUPPORTS_VT=""
-    if grep -q "vmx\|svm" /proc/cpuinfo; then
-        if [ -r /dev/kvm ]; then
-            CPU_SUPPORTS_VT="yes"
-            print_success "CPU virtualization support detected"
-        else
-            print_warning "CPU supports virtualization but KVM module not loaded"
-            CPU_SUPPORTS_VT="limited"
-        fi
-    else
-        print_warning "CPU does not support hardware virtualization (VT-x/AMD-V)"
-        CPU_SUPPORTS_VT="no"
-    fi
-
-    # Check for UEFI BIOS file and CPU compatibility
-    UEFI_BIOS=""
-    USE_UEFI="no"
-    
-    # Check if user wants to force legacy BIOS
-    if [ "${FORCE_LEGACY_BIOS:-}" = "1" ] || [ "${DISABLE_UEFI:-}" = "1" ]; then
-        print_warning "UEFI disabled by user - forcing legacy BIOS mode"
-        USE_UEFI="no"
-    # Only try UEFI if CPU supports virtualization properly
-    elif [ "$CPU_SUPPORTS_VT" = "yes" ]; then
-        for bios_path in /usr/share/ovmf/OVMF.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2-ovmf/x64/OVMF.fd; do
-            if [ -f "$bios_path" ]; then
-                # Test OVMF compatibility with a quick test
-                print_info "Testing OVMF compatibility..."
-                if timeout 10s qemu-system-x86_64 -bios "$bios_path" -M pc -m 512 -nographic -serial null -monitor null -daemonize -pidfile /tmp/ovmf_test.pid 2>/dev/null; then
-                    # Kill the test VM
-                    if [ -f /tmp/ovmf_test.pid ]; then
-                        kill $(cat /tmp/ovmf_test.pid) 2>/dev/null || true
-                        rm -f /tmp/ovmf_test.pid
-                    fi
-                    UEFI_BIOS="$bios_path"
-                    USE_UEFI="yes"
-                    print_success "OVMF compatibility test passed"
-                    break
-                else
-                    print_warning "OVMF compatibility test failed for $bios_path"
-                fi
-            fi
-        done
-        
-        # If all tests failed, disable UEFI
-        if [ "$USE_UEFI" = "no" ]; then
-            print_warning "All OVMF tests failed - falling back to legacy BIOS"
-        fi
-    fi
-
     if [ "$USE_UEFI" = "yes" ]; then
-        print_success "UEFI BIOS found: $UEFI_BIOS"
+        print_success "Using UEFI BIOS: $UEFI_BIOS"
         BIOS_OPTION="-bios $UEFI_BIOS"
     else
         if [ "$CPU_SUPPORTS_VT" = "no" ]; then
-            print_warning "Using legacy BIOS - CPU lacks virtualization support for UEFI"
+            print_warning "Using legacy BIOS - CPU lacks virtualization support"
         else
-            print_warning "Using legacy BIOS - OVMF not found or CPU compatibility limited"
+            print_warning "Using legacy BIOS - OVMF not found or disabled"
         fi
-        # Force legacy BIOS mode explicitly
         BIOS_OPTION="-machine pc,accel=kvm:tcg"
     fi
 
@@ -845,7 +834,7 @@ EOF
     echo -e "${BRIGHT_GREEN}|${NC}              ${BOLD}${GREEN}*** INSTALLATION COMPLETED SUCCESSFULLY! ***${NC}                   ${BRIGHT_GREEN}|${NC}"
     echo -e "${BRIGHT_GREEN}|                                                                               |${NC}"
     echo -e "${BRIGHT_GREEN}|-------------------------------------------------------------------------------|${NC}"
-    echo -e "${BRIGHT_GREEN}|                                                                               |${NC}"
+    echo -e "${BRIGHT_GREEN}|${NC}                                                                               ${BRIGHT_GREEN}|${NC}"
     echo -e "${BRIGHT_GREEN}|${NC}   ${BOLD}${CYAN}Server Connection Details:${NC}                                                 ${BRIGHT_GREEN}|${NC}"
     echo -e "${BRIGHT_GREEN}|${NC}                                                                               ${BRIGHT_GREEN}|${NC}"
     echo -e "${BRIGHT_GREEN}|${NC}   ${CYAN}IP Address:${NC}      ${YELLOW}$SERVER_IP${NC}"
@@ -901,37 +890,11 @@ EOF
 }
 
 # Main execution
-if [ "${BASH_SOURCE[0]}" == "${0}" ]; then
-    if [ $# -eq 0 ]; then
-        clear
-        echo "DigiRDP Windows Server Installer"
-        echo "================================="
-        echo
-        echo "Usage: $0 [IP] [GATEWAY] [VERSION] [PASSWORD]"
-        echo
-        echo "Examples:"
-        echo "  Quick install: $0 auto auto 2022"
-        echo "  With password: $0 auto auto 2022 MySecurePass123!"
-        echo "  Manual network: $0 192.168.1.100 192.168.1.1 2022"
-        echo "  Force legacy BIOS: DISABLE_UEFI=1 $0 auto auto 2022"
-        echo
-        echo "Default password: DigiRDP2025!"
-        echo "Supported versions: 2016, 2019, 2022"
-        echo
-        echo "Environment variables:"
-        echo "  DISABLE_UEFI=1      Force legacy BIOS (disable UEFI/OVMF)"
-        echo "  FORCE_LEGACY_BIOS=1 Same as DISABLE_UEFI=1"
-        echo
-        exit 1
-    fi
+# FIX: Removed the original if/then block that handled command-line arguments.
+# This script is now intended to be run as-is, using the variables set at the top.
 
-    # Check and launch in screen if needed
-    check_and_launch_screen "$@"
-
-    # If we get here, we're already in screen
-    perform_installation "$@"
-fi
-
+# Check and launch in screen if needed
+check_and_launch_screen "$SERVER_IP" "$SERVER_GATEWAY" "$WINDOWS_VERSION" "$ADMIN_PASSWORD"
 
 # Execute installation
 perform_installation "$SERVER_IP" "$SERVER_GATEWAY" "$WINDOWS_VERSION" "$ADMIN_PASSWORD"
