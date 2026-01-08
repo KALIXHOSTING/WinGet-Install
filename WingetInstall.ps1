@@ -75,139 +75,7 @@ foreach ($vc in $vcRedists) {
     }
 }
 
-# --- Download Winget and dependencies from GitHub ---
-
-$wingetVersion = "v1.10.390"
-$githubBase = "https://github.com/microsoft/winget-cli/releases/download/$wingetVersion"
-
-$filesToDownload = @(
-    @{
-        Url = "$githubBase/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
-        FileName = "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
-    },
-    @{
-        Url = "$githubBase/e53e159d00e04f729cc2180cffd1c02e_License1.xml"
-        FileName = "e53e159d00e04f729cc2180cffd1c02e_License1.xml"
-    },
-    @{
-        Url = "$githubBase/DesktopAppInstaller_Dependencies.zip"
-        FileName = "DesktopAppInstaller_Dependencies.zip"
-    }
-)
-
-foreach ($file in $filesToDownload) {
-    $outputPath = Join-Path -Path $terminalPath -ChildPath $file.FileName
-    if (Test-Path -Path $outputPath) {
-        Write-Host "File already exists: $($file.FileName)" -ForegroundColor Yellow
-        continue
-    }
-    try {
-        Write-Host "Downloading $($file.FileName)..." -ForegroundColor Cyan
-        Invoke-WebRequest -Uri $file.Url -OutFile $outputPath -UseBasicParsing
-        Write-Host "Download completed: $($file.FileName)" -ForegroundColor Green
-    }
-    catch {
-        Write-Host "Failed to download $($file.FileName)" -ForegroundColor Red
-        Write-Host "Error: $_" -ForegroundColor Red
-        Pause
-    }
-}
-
-# --- Extract dependencies ZIP and copy required files ---
-
-$zipPath = Join-Path -Path $terminalPath -ChildPath "DesktopAppInstaller_Dependencies.zip"
-$extractPath = Join-Path -Path $terminalPath -ChildPath "Dependencies"
-if (-not (Test-Path -Path $extractPath)) {
-    try {
-        Write-Host "Extracting dependencies ZIP..." -ForegroundColor Cyan
-        Add-Type -AssemblyName System.IO.Compression.FileSystem
-        [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $extractPath)
-        Write-Host "Extraction completed." -ForegroundColor Green
-    }
-    catch {
-        Write-Host "Failed to extract dependencies ZIP." -ForegroundColor Red
-        Write-Host "Error: $_" -ForegroundColor Red
-        Pause
-    }
-} else {
-    Write-Host "Dependencies already extracted." -ForegroundColor Yellow
-}
-
-# Copy required .appx files from x64 subfolder
-$depX64Path = Join-Path -Path $extractPath -ChildPath "x64"
-$appxFiles = @(
-    "Microsoft.UI.Xaml.2.8_8.2501.31001.0_x64.appx",
-    "Microsoft.VCLibs.140.00.UWPDesktop_14.0.33728.0_x64.appx"
-)
-foreach ($appx in $appxFiles) {
-    $src = Join-Path -Path $depX64Path -ChildPath $appx
-    $dst = Join-Path -Path $terminalPath -ChildPath $appx
-    if (-not (Test-Path -Path $dst)) {
-        try {
-            Copy-Item -Path $src -Destination $dst -Force
-            Write-Host "Copied $appx to $terminalPath" -ForegroundColor Green
-        }
-        catch {
-            Write-Host "Failed to copy $appx" -ForegroundColor Red
-            Write-Host "Error: $_" -ForegroundColor Red
-            Pause
-        }
-    } else {
-        Write-Host "$appx already exists in $terminalPath" -ForegroundColor Yellow
-    }
-}
-
-# --- Verify all files are present ---
-
-$allNeededFiles = @(
-    "Microsoft.UI.Xaml.2.8_8.2501.31001.0_x64.appx",
-    "Microsoft.VCLibs.140.00.UWPDesktop_14.0.33728.0_x64.appx",
-    "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle",
-    "e53e159d00e04f729cc2180cffd1c02e_License1.xml"
-)
-$missingFiles = @()
-foreach ($file in $allNeededFiles) {
-    $filePath = Join-Path -Path $terminalPath -ChildPath $file
-    if (-not (Test-Path -Path $filePath)) {
-        $missingFiles += $file
-    }
-}
-if ($missingFiles.Count -gt 0) {
-    Write-Host "Missing files:" -ForegroundColor Red
-    $missingFiles | ForEach-Object { Write-Host "- $_" -ForegroundColor Red }
-    Pause
-}
-
-# --- Install dependencies and Winget ---
-
-$appx1Path = Join-Path -Path $terminalPath -ChildPath "Microsoft.UI.Xaml.2.8_8.2501.31001.0_x64.appx"
-$appx2Path = Join-Path -Path $terminalPath -ChildPath "Microsoft.VCLibs.140.00.UWPDesktop_14.0.33728.0_x64.appx"
-$msixwingetPath = Join-Path -Path $terminalPath -ChildPath "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
-$wingetLicPath = Join-Path -Path $terminalPath -ChildPath "e53e159d00e04f729cc2180cffd1c02e_License1.xml"
-
-try {
-    Write-Host "Installing Microsoft.UI.Xaml package..." -ForegroundColor Cyan
-    Add-AppxPackage -Path $appx1Path -ErrorAction Stop
-    Write-Host "Microsoft.UI.Xaml package installed successfully" -ForegroundColor Green
-}
-catch {
-    Write-Host "Failed to install Microsoft.UI.Xaml package" -ForegroundColor Red
-    Write-Host "Error: $_" -ForegroundColor Red
-    Pause
-}
-
-try {
-    Write-Host "Installing Microsoft.VCLibs package..." -ForegroundColor Cyan
-    Add-AppxPackage -Path $appx2Path -ErrorAction Stop
-    Write-Host "Microsoft.VCLibs package installed successfully" -ForegroundColor Green
-}
-catch {
-    Write-Host "Failed to install Microsoft.VCLibs package" -ForegroundColor Red
-    Write-Host "Error: $_" -ForegroundColor Red
-    Pause
-}
-
-# --- OS detection and Winget install logic ---
+# --- OS detection logic (Moved up for use in loop) ---
 $osVersion = (Get-CimInstance Win32_OperatingSystem).Version
 $isWin10 = $false
 if ($osVersion.StartsWith("10.0")) {
@@ -224,31 +92,123 @@ if ($isWin10 -and $buildNumber -lt 17763) {
     Pause
 }
 
-if ($isWin10) {
-    # Windows 10: Use Add-AppxPackage for current user
+# --- Download and Install Winget (with Fallback) ---
+
+$wingetVersions = @("v1.12.440", "v1.10.390")
+$installSuccess = $false
+
+foreach ($wingetVersion in $wingetVersions) {
+    Write-Host "------------------------------------------------------------" -ForegroundColor Cyan
+    Write-Host "Attempting to install Winget version: $wingetVersion" -ForegroundColor Cyan
+    Write-Host "------------------------------------------------------------" -ForegroundColor Cyan
+
     try {
-        Write-Host "Detected Windows 10. Installing Winget package for current user..." -ForegroundColor Cyan
-        Add-AppxPackage -Path $msixwingetPath -ErrorAction Stop
-        Write-Host "Winget installed successfully (per-user)" -ForegroundColor Green
+        $githubBase = "https://github.com/microsoft/winget-cli/releases/download/$wingetVersion"
+        
+        # Use a version-specific subdirectory to avoid file conflicts
+        $versionDir = Join-Path -Path $terminalPath -ChildPath $wingetVersion
+        if (-not (Test-Path -Path $versionDir)) {
+            New-Item -Path $versionDir -ItemType Directory -Force | Out-Null
+        }
+
+        $filesToDownload = @(
+            @{
+                Url = "$githubBase/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
+                FileName = "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
+            },
+            @{
+                Url = "$githubBase/e53e159d00e04f729cc2180cffd1c02e_License1.xml"
+                FileName = "e53e159d00e04f729cc2180cffd1c02e_License1.xml"
+            },
+            @{
+                Url = "$githubBase/DesktopAppInstaller_Dependencies.zip"
+                FileName = "DesktopAppInstaller_Dependencies.zip"
+            }
+        )
+
+        # 1. Download Files
+        foreach ($file in $filesToDownload) {
+            $outputPath = Join-Path -Path $versionDir -ChildPath $file.FileName
+            if (Test-Path -Path $outputPath) {
+                Write-Host "File already exists: $($file.FileName)" -ForegroundColor Yellow
+            } else {
+                Write-Host "Downloading $($file.FileName)..." -ForegroundColor Cyan
+                Invoke-WebRequest -Uri $file.Url -OutFile $outputPath -UseBasicParsing
+                Write-Host "Download completed: $($file.FileName)" -ForegroundColor Green
+            }
+        }
+
+        # 2. Extract Dependencies
+        $zipPath = Join-Path -Path $versionDir -ChildPath "DesktopAppInstaller_Dependencies.zip"
+        $extractPath = Join-Path -Path $versionDir -ChildPath "Dependencies"
+        
+        if (-not (Test-Path -Path $extractPath)) {
+            Write-Host "Extracting dependencies ZIP..." -ForegroundColor Cyan
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $extractPath)
+            Write-Host "Extraction completed." -ForegroundColor Green
+        } else {
+            Write-Host "Dependencies already extracted." -ForegroundColor Yellow
+        }
+
+        # 3. Copy .appx files (Optional step, but kept for structure consistency or direct install from extracted location)
+        # We can actually install directly from the extracted folder to keep it clean
+        $depX64Path = Join-Path -Path $extractPath -ChildPath "x64"
+        $appxFiles = Get-ChildItem -Path $depX64Path -Filter "*.appx"
+
+        if ($appxFiles.Count -eq 0) {
+            throw "No .appx files found in $depX64Path"
+        }
+
+        # 4. Install Dependencies
+        # Install VCLibs first
+        $vclibs = $appxFiles | Where-Object { $_.Name -like "*VCLibs*" }
+        foreach ($pkg in $vclibs) {
+            Write-Host "Installing $($pkg.Name)..." -ForegroundColor Cyan
+            Add-AppxPackage -Path $pkg.FullName -ErrorAction Stop
+            Write-Host "$($pkg.Name) installed successfully" -ForegroundColor Green
+        }
+
+        # Install other dependencies
+        $others = $appxFiles | Where-Object { $_.Name -notlike "*VCLibs*" }
+        foreach ($pkg in $others) {
+            Write-Host "Installing $($pkg.Name)..." -ForegroundColor Cyan
+            Add-AppxPackage -Path $pkg.FullName -ErrorAction Stop
+            Write-Host "$($pkg.Name) installed successfully" -ForegroundColor Green
+        }
+
+        # 5. Install Main Winget Package
+        $msixwingetPath = Join-Path -Path $versionDir -ChildPath "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
+        $wingetLicPath = Join-Path -Path $versionDir -ChildPath "e53e159d00e04f729cc2180cffd1c02e_License1.xml"
+
+        if ($isWin10) {
+            # Windows 10: Use Add-AppxPackage for current user
+            Write-Host "Detected Windows 10. Installing Winget package for current user..." -ForegroundColor Cyan
+            Add-AppxPackage -Path $msixwingetPath -ErrorAction Stop
+            Write-Host "Winget installed successfully (per-user)" -ForegroundColor Green
+        } else {
+            # Windows 11/Server: Use Add-AppxProvisionedPackage for all users
+            Write-Host "Provisioning Winget package for all users..." -ForegroundColor Cyan
+            Add-AppxProvisionedPackage -Online -PackagePath $msixwingetPath -LicensePath $wingetLicPath -ErrorAction Stop
+            Write-Host "Winget provisioned successfully" -ForegroundColor Green
+        }
+
+        # If we got here, everything succeeded
+        $installSuccess = $true
+        break
     }
     catch {
-        Write-Host "Failed to install Winget package on Windows 10" -ForegroundColor Red
+        Write-Host "Failed to install Winget version $wingetVersion" -ForegroundColor Red
         Write-Host "Error: $_" -ForegroundColor Red
-        Write-Host "Try manually installing the msixbundle or updating Windows 10." -ForegroundColor Yellow
-        Pause
+        Write-Host "Attempting fallback to next version (if available)..." -ForegroundColor Yellow
+        Start-Sleep -Seconds 2
     }
-} else {
-    # Windows 11/Server: Use Add-AppxProvisionedPackage for all users
-    try {
-        Write-Host "Provisioning Winget package for all users..." -ForegroundColor Cyan
-        Add-AppxProvisionedPackage -Online -PackagePath $msixwingetPath -LicensePath $wingetLicPath -ErrorAction Stop
-        Write-Host "Winget provisioned successfully" -ForegroundColor Green
-    }
-    catch {
-        Write-Host "Failed to provision Winget package" -ForegroundColor Red
-        Write-Host "Error: $_" -ForegroundColor Red
-        Pause
-    }
+}
+
+if (-not $installSuccess) {
+    Write-Host "All Winget installation attempts failed." -ForegroundColor Red
+    Write-Host "Proceeding to Chocolatey installation..." -ForegroundColor Yellow
+    # We don't pause here, just let it fall through to Chocolatey check
 }
 
 # Install Chocolatey
